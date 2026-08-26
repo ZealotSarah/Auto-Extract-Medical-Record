@@ -1,0 +1,17 @@
+# Patient-data samples and generated extraction results
+/用例/
+/输出结果/
+
+# Local build and test artifacts
+/.codex_tmp/
+/.pytest_cache/
+/**/__pycache__/
+*.py[cod]
+
+# Local application settings and generated workbooks
+settings.json
+病历抽取结果_*.xlsx
+
+# PyInstaller intermediates
+*.spec
+/build/

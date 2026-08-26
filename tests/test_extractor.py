@@ -1,0 +1,69 @@
+from datetime import date, datetime
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+
+from extractor import allocate_quotas, extract_files, sha256_file
+
+
+def make_book(path: Path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "With"
+    ws.append(["医疗类别名称", "住院或门诊号", "就诊ID", "人员姓名", "个人编号", "身份证号", "入院日期", "出院日期", "结算日期", "医保目录名称", "医保目录编码", "诊断名称"])
+    rows = [
+        ["普通门诊", "M1", "V1", "张三", "P1", "ID1", datetime(2024, 1, 1), None, datetime(2024, 1, 2), "项目A", "A", "诊断甲"],
+        ["普通门诊", "M1", "V1", "张三", "P1", "ID1", datetime(2024, 1, 1), None, datetime(2024, 1, 2), "项目B", "B", "诊断甲"],
+        ["住院", "H1", "V2", "李四", "P2", "ID2", datetime(2025, 6, 1), datetime(2025, 6, 8), datetime(2025, 6, 9), "项目C", "C", "诊断乙"],
+        ["门诊慢特病", "M2", "V3", "王五", "P3", "ID3", None, None, datetime(2025, 9, 1), "项目D", "D", "诊断丙"],
+        ["急诊", "M3", "V4", "赵六", "P4", "ID4", datetime(2026, 12, 31), None, datetime(2027, 1, 1), "项目E", "E", "诊断丁"],
+        ["住院", "H2", "V5", "钱七", "P5", "ID5", datetime(2026, 5, 1), None, None, "项目F", "F", "诊断戊"],
+        ["住院", "OLD", "V6", "孙八", "P6", "ID6", datetime(2023, 12, 31), None, None, "项目G", "G", "诊断己"],
+    ]
+    for row in rows:
+        ws.append(row)
+    wb.save(path)
+
+
+def test_quota_rules():
+    assert allocate_quotas([2024, 2025, 2026], 5) == {2024: 1, 2025: 2, 2026: 2}
+    assert allocate_quotas([2023, 2024, 2025, 2026], 2) == {2023: 1, 2024: 1}
+
+
+def test_end_to_end_privacy_merge_and_source_unchanged(tmp_path):
+    source = tmp_path / "source.xlsx"
+    make_book(source)
+    before = sha256_file(source)
+    output = extract_files([source], date(2024, 1, 1), date(2026, 12, 31), 5, 12345, tmp_path / "out")
+    assert sha256_file(source) == before
+    wb = load_workbook(output, data_only=True)
+    ws = wb["抽取结果"]
+    headers = [cell.value for cell in ws[1]]
+    assert "人员姓名" in headers
+    assert "诊断名称" in headers
+    assert "个人编号" not in headers
+    assert "身份证号" not in headers
+    rows = [dict(zip(headers, row)) for row in ws.iter_rows(min_row=2, values_only=True)]
+    assert len(rows) == 5
+    merged = next(row for row in rows if row["就诊ID"] == "V1")
+    assert merged["人员姓名"] == "张三"
+    assert merged["医保目录名称"] == "项目A；项目B"
+    assert merged["医保目录编码"] == "A；B"
+    assert {row["归属年份"] for row in rows} == {2024, 2025, 2026}
+    assert next(row for row in rows if row["就诊ID"] == "V4")["归属年份"] == 2026
+    wb.close()
+
+
+def test_same_seed_same_visits(tmp_path):
+    source = tmp_path / "source.xlsx"
+    make_book(source)
+    outputs = [extract_files([source], date(2024, 1, 1), date(2026, 12, 31), 3, 77, tmp_path / f"out{i}") for i in range(2)]
+    visits = []
+    for output in outputs:
+        wb = load_workbook(output, data_only=True)
+        ws = wb["抽取结果"]
+        headers = [cell.value for cell in ws[1]]
+        index = headers.index("就诊ID")
+        visits.append([row[index] for row in ws.iter_rows(min_row=2, values_only=True)])
+        wb.close()
+    assert visits[0] == visits[1]
