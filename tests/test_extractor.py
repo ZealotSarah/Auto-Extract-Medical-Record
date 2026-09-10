@@ -3,7 +3,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from extractor import allocate_quotas, extract_files, sha256_file
+from extractor import allocate_quotas, extract_files, parse_date, sha256_file
 
 
 def make_book(path: Path):
@@ -28,6 +28,11 @@ def make_book(path: Path):
 def test_quota_rules():
     assert allocate_quotas([2024, 2025, 2026], 5) == {2024: 1, 2025: 2, 2026: 2}
     assert allocate_quotas([2023, 2024, 2025, 2026], 2) == {2023: 1, 2024: 1}
+
+
+def test_parse_slash_datetime_with_milliseconds():
+    parsed = parse_date("2024/05/18 09:47:56.000")
+    assert parsed == datetime(2024, 5, 18, 9, 47, 56)
 
 
 def test_end_to_end_privacy_merge_and_source_unchanged(tmp_path):
