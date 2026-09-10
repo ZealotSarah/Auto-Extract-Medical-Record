@@ -32,6 +32,7 @@ ALIASES = {
 SENSITIVE_PATTERNS = ("人员编号", "个人编号", "人员编码", "个人编码", "身份证", "证件号码", "证件号", "psnno", "certno")
 MINIMUM_ORDER = ("医疗类别名称", "医疗类别编码", "住院或门诊号", "就诊ID", "人员姓名", "入院日期", "出院日期", "结算日期", "医保目录名称", "医保目录编码")
 META_ORDER = ("来源文件", "来源工作表", "源行号", "归属年份", "日期来源", "标准就诊类型", "随机种子")
+APP_VERSION = "1.6"
 
 
 @dataclass
@@ -117,23 +118,7 @@ def _field_map(headers: list[str]) -> dict[str, str | None]:
     return result
 
 
-def _find_business_sheet(workbook):
-    best = None
-    best_score = -1
-    for sheet in workbook.worksheets:
-        for row_no, row in enumerate(sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 10), values_only=True), 1):
-            headers = [str(value).strip() if value is not None else "" for value in row]
-            mapping = _field_map(headers)
-            score = sum(bool(mapping[key]) for key in ("admission", "settlement", "category", "visit_id", "name", "item_name"))
-            if score > best_score:
-                best = (sheet, row_no, headers, mapping)
-                best_score = score
-    if not best or best_score < 2 or not (best[3]["admission"] or best[3]["settlement"]):
-        raise ValueError("未找到包含日期字段的业务工作表")
-    return best
-
-
-def _validate_required_fields(mapping: dict[str, str | None]) -> None:
+def _missing_required_fields(mapping: dict[str, str | None]) -> list[str]:
     missing = []
     if not (mapping["admission"] or mapping["settlement"]):
         missing.append("入院时间或结算时间")
@@ -147,6 +132,28 @@ def _validate_required_fields(mapping: dict[str, str | None]) -> None:
     ):
         if not mapping[field]:
             missing.append(label)
+    return missing
+
+
+def _find_business_sheet(workbook):
+    best = None
+    best_rank = (-1, -1)
+    for sheet in workbook.worksheets:
+        for row_no, row in enumerate(sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 10), values_only=True), 1):
+            headers = [str(value).strip() if value is not None else "" for value in row]
+            mapping = _field_map(headers)
+            score = sum(bool(value) for value in mapping.values())
+            rank = (not _missing_required_fields(mapping), score)
+            if rank > best_rank:
+                best = (sheet, row_no, headers, mapping)
+                best_rank = rank
+    if not best or not (best[3]["admission"] or best[3]["settlement"]):
+        raise ValueError("未找到包含日期字段的业务工作表")
+    return best
+
+
+def _validate_required_fields(mapping: dict[str, str | None]) -> None:
+    missing = _missing_required_fields(mapping)
     if missing:
         raise ValueError(f"业务工作表缺少必要字段：{'、'.join(missing)}")
 
@@ -171,13 +178,15 @@ def _record_key(row: dict[str, Any], mapping: dict[str, str | None], row_no: int
     return values if meaningful else values + (f"__row_{row_no}",)
 
 
-def _merge_unique(values: Iterable[Any]) -> str:
-    seen = []
-    for value in values:
-        text = str(value).strip() if value is not None else ""
-        if text and text not in seen:
-            seen.append(text)
-    return "；".join(seen)
+def _merge_items(group: list[tuple[int, dict[str, Any], datetime, str]], name_header: str, code_header: str) -> tuple[str, str]:
+    pairs = []
+    for entry in group:
+        name = str(entry[1].get(name_header) or "").strip()
+        code = str(entry[1].get(code_header) or "").strip()
+        pair = (name, code)
+        if pair != ("", "") and pair not in pairs:
+            pairs.append(pair)
+    return "；".join(name for name, _ in pairs), "；".join(code for _, code in pairs)
 
 
 def read_candidates(path: Path, start: date, end: date, seed: int) -> tuple[list[dict[str, Any]], FileSummary, list[str]]:
@@ -214,10 +223,8 @@ def read_candidates(path: Path, start: date, end: date, seed: int) -> tuple[list
                 merged[header] = next((entry[1].get(header) for entry in group if entry[1].get(header) not in (None, "")), None)
             item_name_header = mapping.get("item_name")
             item_code_header = mapping.get("item_code")
-            if item_name_header:
-                merged[item_name_header] = _merge_unique(entry[1].get(item_name_header) for entry in group)
-            if item_code_header:
-                merged[item_code_header] = _merge_unique(entry[1].get(item_code_header) for entry in group)
+            if item_name_header and item_code_header:
+                merged[item_name_header], merged[item_code_header] = _merge_items(group, item_name_header, item_code_header)
             category = str(_value(first_row, mapping, "category") or "")
             decision = group[0][2]
             merged.update({
@@ -360,7 +367,7 @@ def unique_output_path(directory: Path, seed: int) -> Path:
     raise RuntimeError("无法生成不重名的输出文件")
 
 
-def extract_files(files: Iterable[str | Path], start: date, end: date, target: int, seed: int, output_dir: str | Path) -> Path:
+def extract_files(files: Iterable[str | Path], start: date, end: date, target: int, seed: int, output_dir: str | Path, return_errors: bool = False):
     if start > end:
         raise ValueError("检查开始日期不能晚于结束日期")
     if target < 1:
@@ -386,8 +393,8 @@ def extract_files(files: Iterable[str | Path], start: date, end: date, target: i
     output = unique_output_path(Path(output_dir).resolve(), seed)
     if output in sources:
         raise ValueError("输出文件不能与源文件相同")
-    params = {"检查开始日期": start.isoformat(), "检查结束日期": end.isoformat(), "每文件目标条数": target, "随机种子": seed, "隐私规则": "姓名完整保留；个人/人员编号、身份证/证件号整列不输出"}
+    params = {"工具版本": APP_VERSION, "检查开始日期": start.isoformat(), "检查结束日期": end.isoformat(), "每文件目标条数": target, "随机种子": seed, "隐私规则": "姓名完整保留；个人/人员编号、身份证/证件号整列不输出"}
     write_result(output, records, summaries, params, raw_headers, errors)
     if len(errors) == len(sources):
         raise BatchExtractionError(output, errors)
-    return output
+    return (output, errors) if return_errors else output

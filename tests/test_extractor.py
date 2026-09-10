@@ -58,6 +58,8 @@ def test_end_to_end_privacy_merge_and_source_unchanged(tmp_path):
     assert merged["医保目录编码"] == "A；B"
     assert {row["归属年份"] for row in rows} == {2024, 2025, 2026}
     assert next(row for row in rows if row["就诊ID"] == "V4")["归属年份"] == 2026
+    params = dict(wb["参数"].iter_rows(min_row=2, values_only=True))
+    assert params["工具版本"] == "1.6"
     wb.close()
 
 
@@ -111,3 +113,48 @@ def test_equivalent_date_formats_merge_into_one_record(tmp_path):
     records, _, _ = read_candidates(source, date(2024, 1, 1), date(2024, 12, 31), 1)
     assert len(records) == 1
     assert records[0]["医保目录名称"] == "项目A；项目B"
+
+
+def test_complete_business_sheet_wins_over_earlier_partial_sheet(tmp_path):
+    source = tmp_path / "sheets.xlsx"
+    wb = Workbook()
+    partial = wb.active
+    partial.title = "Partial"
+    partial.append(["入院时间", "医疗类别", "就诊ID", "姓名", "医保目录名称"])
+    complete = wb.create_sheet("Complete")
+    complete.append(["入院时间", "医疗类别", "住院号", "就诊ID", "姓名", "医保目录名称", "医保目录编码"])
+    complete.append([datetime(2025, 1, 1), "门诊", "M1", "V1", "张三", "项目A", "A"])
+    wb.save(source)
+    records, _, _ = read_candidates(source, date(2025, 1, 1), date(2025, 12, 31), 1)
+    assert len(records) == 1
+    assert records[0]["来源工作表"] == "Complete"
+
+
+def test_item_name_and_code_are_deduplicated_as_pairs(tmp_path):
+    source = tmp_path / "items.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["医疗类别", "住院号", "就诊ID", "姓名", "入院时间", "医保目录名称", "医保目录编码"])
+    ws.append(["门诊", "M1", "V1", "张三", datetime(2025, 1, 1), "同名项目", "A"])
+    ws.append(["门诊", "M1", "V1", "张三", datetime(2025, 1, 1), "同名项目", "B"])
+    ws.append(["门诊", "M1", "V1", "张三", datetime(2025, 1, 1), "同名项目", "A"])
+    wb.save(source)
+    records, _, _ = read_candidates(source, date(2025, 1, 1), date(2025, 12, 31), 1)
+    assert records[0]["医保目录名称"] == "同名项目；同名项目"
+    assert records[0]["医保目录编码"] == "A；B"
+
+
+def test_partial_failure_details_can_be_returned(tmp_path):
+    source = tmp_path / "source.xlsx"
+    make_book(source)
+    output, errors = extract_files(
+        [source, tmp_path / "missing.xlsx"],
+        date(2024, 1, 1),
+        date(2026, 12, 31),
+        2,
+        1,
+        tmp_path / "out",
+        return_errors=True,
+    )
+    assert output.exists()
+    assert errors and errors[0][0] == "missing.xlsx"

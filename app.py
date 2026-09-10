@@ -10,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from extractor import extract_files
+from extractor import APP_VERSION, extract_files
 
 
 SETTINGS_PATH = Path(os.getenv("APPDATA", Path.home())) / "病历自动抽取工具" / "settings.json"
@@ -31,6 +31,15 @@ def save_settings(start: date, end: date, path: Path = SETTINGS_PATH) -> None:
     path.write_text(json.dumps({"start_date": start.isoformat(), "end_date": end.isoformat()}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def validate_run_parameters(start: date, end: date, count: int, output_dir: str) -> None:
+    if start > end:
+        raise ValueError("检查开始日期不能晚于结束日期")
+    if count < 1:
+        raise ValueError("每文件抽取条数必须大于 0")
+    if not output_dir.strip():
+        raise ValueError("请选择输出目录")
+
+
 def run_cli(args) -> None:
     output = extract_files(args.input, date.fromisoformat(args.start), date.fromisoformat(args.end), args.count, args.seed, args.output_dir)
     print(output)
@@ -39,7 +48,7 @@ def run_cli(args) -> None:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("病历自动抽取工具 V1.0")
+        self.title(f"病历自动抽取工具 V{APP_VERSION}")
         self.geometry("820x600")
         self.minsize(720, 520)
         self.files: list[str] = []
@@ -123,23 +132,29 @@ class App(tk.Tk):
             end = date.fromisoformat(self.end_var.get().strip())
             count = int(self.count_var.get())
             seed = int(self.seed_var.get().strip())
+            output_dir = self.output_var.get().strip()
+            validate_run_parameters(start, end, count, output_dir)
             save_settings(start, end)
         except Exception as exc:
             messagebox.showerror("参数错误", str(exc))
             return
         self.run_button.configure(state="disabled")
         self.status_var.set("正在抽取，请稍候……")
-        threading.Thread(target=self._run, args=(start, end, count, seed), daemon=True).start()
+        threading.Thread(target=self._run, args=(tuple(self.files), start, end, count, seed, output_dir), daemon=True).start()
 
-    def _run(self, start, end, count, seed):
+    def _run(self, files, start, end, count, seed, output_dir):
         try:
-            output = extract_files(self.files, start, end, count, seed, self.output_var.get())
-            self.after(0, lambda: self._finished(output))
+            output, errors = extract_files(files, start, end, count, seed, output_dir, return_errors=True)
+            self.after(0, lambda: self._finished(output, errors))
         except Exception as exc:
             self.after(0, lambda error=exc: self._failed(error))
 
-    def _finished(self, output: Path):
+    def _finished(self, output: Path, errors: list[tuple[str, str]]):
         self.run_button.configure(state="normal")
+        if errors:
+            self.status_var.set(f"完成，但有 {len(errors)} 个文件失败：{output}")
+            messagebox.showwarning("抽取完成（有异常）", f"结果已保存到：\n{output}\n\n有 {len(errors)} 个文件处理失败，请查看“异常明细”工作表。")
+            return
         self.status_var.set(f"完成：{output}")
         messagebox.showinfo("抽取完成", f"结果已保存到：\n{output}")
 
