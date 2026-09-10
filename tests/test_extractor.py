@@ -1,9 +1,11 @@
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
+
 from openpyxl import Workbook, load_workbook
 
-from extractor import allocate_quotas, extract_files, parse_date, sha256_file
+from extractor import BatchExtractionError, allocate_quotas, extract_files, parse_date, read_candidates, sha256_file
 
 
 def make_book(path: Path):
@@ -72,3 +74,40 @@ def test_same_seed_same_visits(tmp_path):
         visits.append([row[index] for row in ws.iter_rows(min_row=2, values_only=True)])
         wb.close()
     assert visits[0] == visits[1]
+
+
+def test_all_files_failed_raises_and_keeps_error_report(tmp_path):
+    with pytest.raises(BatchExtractionError) as caught:
+        extract_files([tmp_path / "missing.xlsx"], date(2024, 1, 1), date(2026, 12, 31), 5, 1, tmp_path / "out")
+    report = caught.value.output_path
+    assert report.exists()
+    wb = load_workbook(report, data_only=True)
+    assert wb["运行汇总"]["F2"].value == "失败"
+    assert wb["异常明细"]["A2"].value == "missing.xlsx"
+    wb.close()
+
+
+def test_missing_required_fields_is_rejected(tmp_path):
+    source = tmp_path / "invalid.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["入院时间", "姓名"])
+    ws.append([datetime(2024, 1, 1), "张三"])
+    wb.save(source)
+    with pytest.raises(ValueError, match="业务工作表缺少必要字段") as caught:
+        read_candidates(source, date(2024, 1, 1), date(2024, 12, 31), 1)
+    assert "医疗类别" in str(caught.value)
+    assert "医保目录编码" in str(caught.value)
+
+
+def test_equivalent_date_formats_merge_into_one_record(tmp_path):
+    source = tmp_path / "dates.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["医疗类别", "住院号", "就诊ID", "姓名", "入院时间", "出院时间", "医保目录名称", "医保目录编码"])
+    ws.append(["住院", "H1", "V1", "张三", datetime(2024, 1, 1), datetime(2024, 1, 2), "项目A", "A"])
+    ws.append(["住院", "H1", "V1", "张三", "2024/01/01 00:00:00.000", "2024-01-02 00:00:00", "项目B", "B"])
+    wb.save(source)
+    records, _, _ = read_candidates(source, date(2024, 1, 1), date(2024, 12, 31), 1)
+    assert len(records) == 1
+    assert records[0]["医保目录名称"] == "项目A；项目B"

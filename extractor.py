@@ -45,6 +45,13 @@ class FileSummary:
     message: str = ""
 
 
+class BatchExtractionError(RuntimeError):
+    def __init__(self, output_path: Path, errors: list[tuple[str, str]]):
+        self.output_path = output_path
+        self.errors = errors
+        super().__init__(f"所有输入文件均处理失败。异常报告已保存：{output_path}")
+
+
 def normalize(value: Any) -> str:
     return re.sub(r"[\s_\-（）()]+", "", str(value or "")).lower()
 
@@ -126,6 +133,24 @@ def _find_business_sheet(workbook):
     return best
 
 
+def _validate_required_fields(mapping: dict[str, str | None]) -> None:
+    missing = []
+    if not (mapping["admission"] or mapping["settlement"]):
+        missing.append("入院时间或结算时间")
+    for field, label in (
+        ("category", "医疗类别"),
+        ("visit_no", "住院号或门诊号"),
+        ("visit_id", "就诊ID"),
+        ("name", "姓名"),
+        ("item_name", "医保目录名称"),
+        ("item_code", "医保目录编码"),
+    ):
+        if not mapping[field]:
+            missing.append(label)
+    if missing:
+        raise ValueError(f"业务工作表缺少必要字段：{'、'.join(missing)}")
+
+
 def _value(row: dict[str, Any], mapping: dict[str, str | None], field: str) -> Any:
     header = mapping.get(field)
     return row.get(header) if header else None
@@ -133,7 +158,15 @@ def _value(row: dict[str, Any], mapping: dict[str, str | None], field: str) -> A
 
 def _record_key(row: dict[str, Any], mapping: dict[str, str | None], row_no: int) -> tuple:
     fields = ("visit_id", "name", "personal_code", "id_card", "admission", "discharge")
-    values = tuple(str(_value(row, mapping, field) or "").strip() for field in fields)
+    values = []
+    for field in fields:
+        value = _value(row, mapping, field)
+        if field in ("admission", "discharge"):
+            parsed = parse_date(value)
+            values.append(parsed.isoformat(timespec="microseconds") if parsed else str(value or "").strip())
+        else:
+            values.append(str(value or "").strip())
+    values = tuple(values)
     meaningful = any(values[index] for index in (0, 1, 2, 3))
     return values if meaningful else values + (f"__row_{row_no}",)
 
@@ -153,6 +186,7 @@ def read_candidates(path: Path, start: date, end: date, seed: int) -> tuple[list
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         sheet, header_row, raw_headers, mapping = _find_business_sheet(workbook)
+        _validate_required_fields(mapping)
         headers = []
         for index, header in enumerate(raw_headers, 1):
             headers.append(header or f"未命名列{index}")
@@ -331,9 +365,11 @@ def extract_files(files: Iterable[str | Path], start: date, end: date, target: i
         raise ValueError("检查开始日期不能晚于结束日期")
     if target < 1:
         raise ValueError("每文件抽取条数必须大于 0")
+    sources = [Path(file).resolve() for file in files]
+    if not sources:
+        raise ValueError("请至少选择一个输入文件")
     records, summaries, raw_headers, errors = [], [], [], []
-    for file in files:
-        source = Path(file).resolve()
+    for source in sources:
         try:
             file_seed = int(hashlib.sha256(f"{seed}|{source.name.lower()}".encode("utf-8")).hexdigest()[:16], 16)
             candidates, summary, headers = read_candidates(source, start, end, file_seed)
@@ -348,8 +384,10 @@ def extract_files(files: Iterable[str | Path], start: date, end: date, target: i
             summaries.append(FileSummary(source.name, status="失败", message=str(exc)))
             errors.append((source.name, str(exc)))
     output = unique_output_path(Path(output_dir).resolve(), seed)
-    if any(Path(file).resolve() == output for file in files):
+    if output in sources:
         raise ValueError("输出文件不能与源文件相同")
     params = {"检查开始日期": start.isoformat(), "检查结束日期": end.isoformat(), "每文件目标条数": target, "随机种子": seed, "隐私规则": "姓名完整保留；个人/人员编号、身份证/证件号整列不输出"}
     write_result(output, records, summaries, params, raw_headers, errors)
+    if len(errors) == len(sources):
+        raise BatchExtractionError(output, errors)
     return output
