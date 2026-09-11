@@ -28,9 +28,15 @@ def load_settings(path: Path = SETTINGS_PATH) -> dict:
         return {}
 
 
-def save_settings(start: date, end: date, path: Path = SETTINGS_PATH) -> None:
+def save_settings(start: date, end: date, input_dir: str = "", output_dir: str = "", path: Path = SETTINGS_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"start_date": start.isoformat(), "end_date": end.isoformat()}, ensure_ascii=False, indent=2), encoding="utf-8")
+    data = {
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "input_dir": input_dir,
+        "output_dir": output_dir,
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def validate_run_parameters(start: date, end: date, count: int, output_dir: str) -> None:
@@ -70,9 +76,10 @@ class App(tk.Tk):
         settings = load_settings()
         self.start_var = tk.StringVar(value=settings.get("start_date", f"{today.year}-01-01"))
         self.end_var = tk.StringVar(value=settings.get("end_date", today.isoformat()))
+        self.input_dir = settings.get("input_dir") or str(Path.cwd())
         self.count_var = tk.IntVar(value=5)
         self.seed_var = tk.StringVar(value=str(random.SystemRandom().randint(100000, 999999999)))
-        self.output_var = tk.StringVar(value=str(Path.cwd() / "输出结果"))
+        self.output_var = tk.StringVar(value=settings.get("output_dir") or str(Path.cwd() / "输出结果"))
         self.status_var = tk.StringVar(value="请选择 Excel 文件。")
         self._build()
 
@@ -108,7 +115,9 @@ class App(tk.Tk):
         ttk.Label(frame, textvariable=self.status_var, foreground="#1F4E78").pack(anchor="w")
 
     def add_files(self):
-        chosen = filedialog.askopenfilenames(filetypes=[("Excel 文件", "*.xlsx")])
+        chosen = filedialog.askopenfilenames(initialdir=self.input_dir, filetypes=[("Excel 文件", "*.xlsx")])
+        if chosen:
+            self.input_dir = str(Path(chosen[0]).resolve().parent)
         self._add_paths(chosen)
 
     def _add_paths(self, paths):
@@ -125,9 +134,10 @@ class App(tk.Tk):
             del self.files[index]
 
     def add_folder(self):
-        chosen = filedialog.askdirectory()
+        chosen = filedialog.askdirectory(initialdir=self.input_dir)
         if not chosen:
             return
+        self.input_dir = str(Path(chosen).resolve())
         self._add_paths(sorted(Path(chosen).iterdir()))
 
     def clear_files(self):
@@ -135,7 +145,7 @@ class App(tk.Tk):
         self.listbox.delete(0, "end")
 
     def choose_output(self):
-        chosen = filedialog.askdirectory()
+        chosen = filedialog.askdirectory(initialdir=self.output_var.get().strip() or str(Path.cwd()))
         if chosen:
             self.output_var.set(chosen)
 
@@ -149,7 +159,7 @@ class App(tk.Tk):
             seed = int(self.seed_var.get().strip())
             output_dir = self.output_var.get().strip()
             validate_run_parameters(start, end, count, output_dir)
-            save_settings(start, end)
+            save_settings(start, end, self.input_dir, output_dir)
         except Exception as exc:
             messagebox.showerror("参数错误", str(exc))
             return

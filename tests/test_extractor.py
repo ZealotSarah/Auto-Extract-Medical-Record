@@ -59,7 +59,7 @@ def test_end_to_end_privacy_merge_and_source_unchanged(tmp_path):
     assert {row["归属年份"] for row in rows} == {2024, 2025, 2026}
     assert next(row for row in rows if row["就诊ID"] == "V4")["归属年份"] == 2026
     params = dict(wb["参数"].iter_rows(min_row=2, values_only=True))
-    assert params["工具版本"] == "1.7"
+    assert params["工具版本"] == "1.8"
     wb.close()
 
 
