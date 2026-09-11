@@ -32,7 +32,7 @@ ALIASES = {
 SENSITIVE_PATTERNS = ("人员编号", "个人编号", "人员编码", "个人编码", "身份证", "证件号码", "证件号", "psnno", "certno")
 MINIMUM_ORDER = ("医疗类别名称", "医疗类别编码", "住院或门诊号", "就诊ID", "人员姓名", "入院日期", "出院日期", "结算日期", "医保目录名称", "医保目录编码")
 META_ORDER = ("来源文件", "来源工作表", "源行号", "归属年份", "日期来源", "标准就诊类型", "随机种子")
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 
 
 @dataclass
@@ -307,15 +307,16 @@ def write_result(path: Path, records: list[dict[str, Any]], summaries: list[File
     result.title = "抽取结果"
     rows = [_canonical_row(record) for record in records]
     other_headers = []
+    known_headers = {normalize(alias) for aliases in ALIASES.values() for alias in aliases}
     for header in raw_headers:
-        if header not in MINIMUM_ORDER and header not in META_ORDER and not is_sensitive_header(header) and header not in other_headers:
+        if normalize(header) not in known_headers and header not in META_ORDER and not is_sensitive_header(header) and header not in other_headers:
             other_headers.append(header)
     headers = [header for header in MINIMUM_ORDER if any(row.get(header) not in (None, "") for row in rows)] + other_headers + list(META_ORDER)
     _write_sheet(result, headers, [[row.get(header) for header in headers] for row in rows])
 
     summary_sheet = workbook.create_sheet("运行汇总")
-    summary_headers = ["源文件", "源数据行数", "检查范围内行数", "合并后病历数", "实际抽取数", "状态", "说明"]
-    _write_sheet(summary_sheet, summary_headers, [[s.file, s.source_rows, s.in_range_rows, s.records, s.selected, s.status, s.message] for s in summaries])
+    summary_headers = ["源文件", "源数据行数", "检查范围内行数", "范围外或日期无效行数", "合并后病历数", "实际抽取数", "状态", "说明"]
+    _write_sheet(summary_sheet, summary_headers, [[s.file, s.source_rows, s.in_range_rows, s.source_rows - s.in_range_rows, s.records, s.selected, s.status, s.message] for s in summaries])
 
     error_sheet = workbook.create_sheet("异常明细")
     _write_sheet(error_sheet, ["源文件", "异常说明"], errors)

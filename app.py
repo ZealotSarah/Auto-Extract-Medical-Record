@@ -19,8 +19,10 @@ SETTINGS_PATH = Path(os.getenv("APPDATA", Path.home())) / "病历自动抽取工
 def load_settings(path: Path = SETTINGS_PATH) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        date.fromisoformat(data["start_date"])
-        date.fromisoformat(data["end_date"])
+        start = date.fromisoformat(data["start_date"])
+        end = date.fromisoformat(data["end_date"])
+        if start > end:
+            raise ValueError("检查开始日期不能晚于结束日期")
         return data
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return {}
@@ -38,6 +40,18 @@ def validate_run_parameters(start: date, end: date, count: int, output_dir: str)
         raise ValueError("每文件抽取条数必须大于 0")
     if not output_dir.strip():
         raise ValueError("请选择输出目录")
+
+
+def normalize_excel_paths(paths) -> list[str]:
+    normalized = []
+    seen = set()
+    for value in paths:
+        path = Path(value).resolve()
+        key = str(path).casefold()
+        if path.suffix.casefold() == ".xlsx" and key not in seen:
+            normalized.append(str(path))
+            seen.add(key)
+    return normalized
 
 
 def run_cli(args) -> None:
@@ -94,11 +108,16 @@ class App(tk.Tk):
         ttk.Label(frame, textvariable=self.status_var, foreground="#1F4E78").pack(anchor="w")
 
     def add_files(self):
-        chosen = filedialog.askopenfilenames(filetypes=[("Excel 文件", "*.xlsx"), ("所有文件", "*.*")])
-        for file in chosen:
-            if file not in self.files:
+        chosen = filedialog.askopenfilenames(filetypes=[("Excel 文件", "*.xlsx")])
+        self._add_paths(chosen)
+
+    def _add_paths(self, paths):
+        existing = {str(Path(file).resolve()).casefold() for file in self.files}
+        for file in normalize_excel_paths(paths):
+            if file.casefold() not in existing:
                 self.files.append(file)
                 self.listbox.insert("end", file)
+                existing.add(file.casefold())
 
     def remove_selected(self):
         for index in reversed(self.listbox.curselection()):
@@ -109,11 +128,7 @@ class App(tk.Tk):
         chosen = filedialog.askdirectory()
         if not chosen:
             return
-        for file in sorted(Path(chosen).glob("*.xlsx")):
-            text = str(file)
-            if text not in self.files:
-                self.files.append(text)
-                self.listbox.insert("end", text)
+        self._add_paths(sorted(Path(chosen).iterdir()))
 
     def clear_files(self):
         self.files.clear()

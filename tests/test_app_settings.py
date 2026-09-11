@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from app import load_settings, save_settings, validate_run_parameters
+from app import load_settings, normalize_excel_paths, save_settings, validate_run_parameters
 
 
 def test_date_range_is_remembered(tmp_path):
@@ -15,6 +15,18 @@ def test_invalid_settings_are_ignored(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text('{"start_date":"bad"}', encoding="utf-8")
     assert load_settings(path) == {}
+
+
+def test_reversed_date_settings_are_ignored(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"start_date":"2026-01-01","end_date":"2025-01-01"}', encoding="utf-8")
+    assert load_settings(path) == {}
+
+
+def test_excel_paths_are_filtered_and_deduplicated(tmp_path):
+    first = tmp_path / "sample.xlsx"
+    result = normalize_excel_paths([first, str(first), tmp_path / "notes.txt"])
+    assert result == [str(first.resolve())]
 
 
 def test_invalid_run_parameters_are_rejected_before_saving():

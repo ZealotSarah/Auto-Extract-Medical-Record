@@ -59,7 +59,7 @@ def test_end_to_end_privacy_merge_and_source_unchanged(tmp_path):
     assert {row["归属年份"] for row in rows} == {2024, 2025, 2026}
     assert next(row for row in rows if row["就诊ID"] == "V4")["归属年份"] == 2026
     params = dict(wb["参数"].iter_rows(min_row=2, values_only=True))
-    assert params["工具版本"] == "1.6"
+    assert params["工具版本"] == "1.7"
     wb.close()
 
 
@@ -84,7 +84,7 @@ def test_all_files_failed_raises_and_keeps_error_report(tmp_path):
     report = caught.value.output_path
     assert report.exists()
     wb = load_workbook(report, data_only=True)
-    assert wb["运行汇总"]["F2"].value == "失败"
+    assert wb["运行汇总"]["G2"].value == "失败"
     assert wb["异常明细"]["A2"].value == "missing.xlsx"
     wb.close()
 
@@ -158,3 +158,26 @@ def test_partial_failure_details_can_be_returned(tmp_path):
     )
     assert output.exists()
     assert errors and errors[0][0] == "missing.xlsx"
+
+
+def test_alias_columns_are_not_duplicated_and_excluded_rows_are_counted(tmp_path):
+    source = tmp_path / "aliases.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["医疗类别", "住院号", "就诊id", "姓名", "开始时间", "目录名称", "目录编码", "诊断名称"])
+    ws.append(["住院", "H1", "V1", "张三", datetime(2025, 1, 1), "项目A", "A", "诊断甲"])
+    ws.append(["住院", "H2", "V2", "李四", datetime(2023, 1, 1), "项目B", "B", "诊断乙"])
+    wb.save(source)
+
+    output = extract_files([source], date(2024, 1, 1), date(2026, 12, 31), 1, 1, tmp_path / "out")
+    result = load_workbook(output, data_only=True)
+    headers = [cell.value for cell in result["抽取结果"][1]]
+    assert "医疗类别名称" in headers
+    assert "入院日期" in headers
+    assert "诊断名称" in headers
+    assert "医疗类别" not in headers
+    assert "开始时间" not in headers
+    summary_headers = [cell.value for cell in result["运行汇总"][1]]
+    excluded_column = summary_headers.index("范围外或日期无效行数") + 1
+    assert result["运行汇总"].cell(2, excluded_column).value == 1
+    result.close()
