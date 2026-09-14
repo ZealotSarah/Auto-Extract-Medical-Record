@@ -5,7 +5,16 @@ import pytest
 
 from openpyxl import Workbook, load_workbook
 
-from extractor import BatchExtractionError, allocate_quotas, extract_files, parse_date, read_candidates, sha256_file
+from extractor import (
+    MODE_DEPARTMENT_TOP10,
+    BatchExtractionError,
+    allocate_quotas,
+    extract_files,
+    parse_date,
+    read_candidates,
+    select_department_top_records,
+    sha256_file,
+)
 
 
 def make_book(path: Path):
@@ -59,7 +68,7 @@ def test_end_to_end_privacy_merge_and_source_unchanged(tmp_path):
     assert {row["归属年份"] for row in rows} == {2024, 2025, 2026}
     assert next(row for row in rows if row["就诊ID"] == "V4")["归属年份"] == 2026
     params = dict(wb["参数"].iter_rows(min_row=2, values_only=True))
-    assert params["工具版本"] == "1.8"
+    assert params["工具版本"] == "1.9"
     wb.close()
 
 
@@ -181,3 +190,63 @@ def test_alias_columns_are_not_duplicated_and_excluded_rows_are_counted(tmp_path
     excluded_column = summary_headers.index("范围外或日期无效行数") + 1
     assert result["运行汇总"].cell(2, excluded_column).value == 1
     result.close()
+
+
+def test_department_fund_top_ten_accepts_sql_export_and_ranks_each_department(tmp_path):
+    source = tmp_path / "sql-export.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["定点编码", "就诊ID", "住院或门诊号", "医疗类别", "人员编号", "证件号码", "人员姓名", "开始时间", "结算时间", "科室名称", "基金支付总额", "诊断列表"])
+    for department in ("内科", "外科"):
+        for index in range(12):
+            ws.append(["H001", f"{department}-{index}", f"N{index}", "住院", f"P{index}", f"ID{index}", f"患者{index}", datetime(2025, 1, index + 1), datetime(2025, 1, index + 2), department, f"{index * 100:,}.50", "诊断"])
+    ws.append(["H001", "NO-DEPT", "N99", "住院", "P99", "ID99", "无科室", datetime(2025, 1, 1), datetime(2025, 1, 2), None, 999999, "诊断"])
+    ws.append(["H001", "BAD-AMOUNT", "N98", "住院", "P98", "ID98", "坏金额", datetime(2025, 1, 1), datetime(2025, 1, 2), "内科", "无法解析", "诊断"])
+    wb.save(source)
+
+    output = extract_files(
+        [source],
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        1,
+        7,
+        tmp_path / "out",
+        extraction_mode=MODE_DEPARTMENT_TOP10,
+    )
+
+    result = load_workbook(output, data_only=True)
+    ws = result["抽取结果"]
+    headers = [cell.value for cell in ws[1]]
+    rows = [dict(zip(headers, row)) for row in ws.iter_rows(min_row=2, values_only=True)]
+    assert len(rows) == 20
+    assert {row["科室名称"] for row in rows} == {"内科", "外科"}
+    for department in ("内科", "外科"):
+        department_rows = [row for row in rows if row["科室名称"] == department]
+        assert [float(str(row["基金支付总额"]).replace(",", "")) for row in department_rows] == [index * 100 + 0.5 for index in range(11, 1, -1)]
+    assert "人员编号" not in headers
+    assert "证件号码" not in headers
+    params = dict(result["参数"].iter_rows(min_row=2, values_only=True))
+    assert params["抽取方式"] == MODE_DEPARTMENT_TOP10
+    result.close()
+
+
+def test_department_mode_requires_department_and_fund_columns(tmp_path):
+    source = tmp_path / "missing-ranking-fields.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["就诊ID", "人员姓名", "开始时间"])
+    ws.append(["V1", "张三", datetime(2025, 1, 1)])
+    wb.save(source)
+
+    with pytest.raises(ValueError, match="科室名称") as caught:
+        read_candidates(source, date(2025, 1, 1), date(2025, 12, 31), 1, MODE_DEPARTMENT_TOP10)
+    assert "基金支付总额" in str(caught.value)
+
+
+def test_department_ranking_ties_are_stable_and_non_finite_amounts_are_skipped():
+    records = [
+        {"科室名称": "内科", "基金支付总额": "100", "就诊ID": "first"},
+        {"科室名称": "内科", "基金支付总额": "NaN", "就诊ID": "invalid"},
+        {"科室名称": "内科", "基金支付总额": 100, "就诊ID": "second"},
+    ]
+    assert [record["就诊ID"] for record in select_department_top_records(records)] == ["first", "second"]

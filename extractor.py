@@ -6,6 +6,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -27,12 +28,17 @@ ALIASES = {
     "id_card": ("证件号码", "证件号", "身份证号", "身份证号码", "身份证件号码"),
     "item_name": ("医保目录名称", "医保目录名称1", "目录名称"),
     "item_code": ("医保目录编码", "医保目录编码1", "目录编码"),
+    "department": ("科室名称", "入院科室名称", "就诊科室名称"),
+    "fund_payment": ("基金支付总额", "基金支付金额"),
 }
 
 SENSITIVE_PATTERNS = ("人员编号", "个人编号", "人员编码", "个人编码", "身份证", "证件号码", "证件号", "psnno", "certno")
-MINIMUM_ORDER = ("医疗类别名称", "医疗类别编码", "住院或门诊号", "就诊ID", "人员姓名", "入院日期", "出院日期", "结算日期", "医保目录名称", "医保目录编码")
+MINIMUM_ORDER = ("医疗类别名称", "医疗类别编码", "住院或门诊号", "就诊ID", "人员姓名", "科室名称", "基金支付总额", "入院日期", "出院日期", "结算日期", "医保目录名称", "医保目录编码")
 META_ORDER = ("来源文件", "来源工作表", "源行号", "归属年份", "日期来源", "标准就诊类型", "随机种子")
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
+MODE_RANDOM = "按年份随机抽取"
+MODE_DEPARTMENT_TOP10 = "按科室基金支付总金额前十"
+EXTRACTION_MODES = (MODE_RANDOM, MODE_DEPARTMENT_TOP10)
 
 
 @dataclass
@@ -118,24 +124,32 @@ def _field_map(headers: list[str]) -> dict[str, str | None]:
     return result
 
 
-def _missing_required_fields(mapping: dict[str, str | None]) -> list[str]:
+def _missing_required_fields(mapping: dict[str, str | None], extraction_mode: str = MODE_RANDOM) -> list[str]:
     missing = []
     if not (mapping["admission"] or mapping["settlement"]):
         missing.append("入院时间或结算时间")
-    for field, label in (
-        ("category", "医疗类别"),
-        ("visit_no", "住院号或门诊号"),
-        ("visit_id", "就诊ID"),
-        ("name", "姓名"),
-        ("item_name", "医保目录名称"),
-        ("item_code", "医保目录编码"),
-    ):
+    common = (("visit_id", "就诊ID"), ("name", "姓名"))
+    mode_fields = {
+        MODE_RANDOM: (
+            ("category", "医疗类别"),
+            ("visit_no", "住院号或门诊号"),
+            ("item_name", "医保目录名称"),
+            ("item_code", "医保目录编码"),
+        ),
+        MODE_DEPARTMENT_TOP10: (
+            ("department", "科室名称"),
+            ("fund_payment", "基金支付总额"),
+        ),
+    }
+    if extraction_mode not in mode_fields:
+        raise ValueError(f"不支持的抽取方式：{extraction_mode}")
+    for field, label in common + mode_fields[extraction_mode]:
         if not mapping[field]:
             missing.append(label)
     return missing
 
 
-def _find_business_sheet(workbook):
+def _find_business_sheet(workbook, extraction_mode: str = MODE_RANDOM):
     best = None
     best_rank = (-1, -1)
     for sheet in workbook.worksheets:
@@ -143,7 +157,7 @@ def _find_business_sheet(workbook):
             headers = [str(value).strip() if value is not None else "" for value in row]
             mapping = _field_map(headers)
             score = sum(bool(value) for value in mapping.values())
-            rank = (not _missing_required_fields(mapping), score)
+            rank = (not _missing_required_fields(mapping, extraction_mode), score)
             if rank > best_rank:
                 best = (sheet, row_no, headers, mapping)
                 best_rank = rank
@@ -152,8 +166,8 @@ def _find_business_sheet(workbook):
     return best
 
 
-def _validate_required_fields(mapping: dict[str, str | None]) -> None:
-    missing = _missing_required_fields(mapping)
+def _validate_required_fields(mapping: dict[str, str | None], extraction_mode: str = MODE_RANDOM) -> None:
+    missing = _missing_required_fields(mapping, extraction_mode)
     if missing:
         raise ValueError(f"业务工作表缺少必要字段：{'、'.join(missing)}")
 
@@ -189,13 +203,13 @@ def _merge_items(group: list[tuple[int, dict[str, Any], datetime, str]], name_he
     return "；".join(name for name, _ in pairs), "；".join(code for _, code in pairs)
 
 
-def read_candidates(path: Path, start: date, end: date, seed: int) -> tuple[list[dict[str, Any]], FileSummary, list[str]]:
+def read_candidates(path: Path, start: date, end: date, seed: int, extraction_mode: str = MODE_RANDOM) -> tuple[list[dict[str, Any]], FileSummary, list[str]]:
     before_hash = sha256_file(path)
     before_stat = path.stat()
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        sheet, header_row, raw_headers, mapping = _find_business_sheet(workbook)
-        _validate_required_fields(mapping)
+        sheet, header_row, raw_headers, mapping = _find_business_sheet(workbook, extraction_mode)
+        _validate_required_fields(mapping, extraction_mode)
         headers = []
         for index, header in enumerate(raw_headers, 1):
             headers.append(header or f"未命名列{index}")
@@ -233,8 +247,8 @@ def read_candidates(path: Path, start: date, end: date, seed: int) -> tuple[list
                 "源行号": "；".join(str(entry[0]) for entry in group),
                 "归属年份": decision.year,
                 "日期来源": group[0][3],
-                "标准就诊类型": "住院" if "住院" in category else "门诊",
-                "随机种子": seed,
+                "标准就诊类型": ("住院" if "住院" in category else "门诊") if extraction_mode == MODE_RANDOM else None,
+                "随机种子": seed if extraction_mode == MODE_RANDOM else None,
             })
             records.append(merged)
         summary.records = len(records)
@@ -280,6 +294,32 @@ def select_records(records: list[dict[str, Any]], target: int, seed: int) -> lis
     return selected
 
 
+def _parse_amount(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        amount = Decimal(str(value).replace(",", "").strip())
+        return amount if amount.is_finite() else None
+    except InvalidOperation:
+        return None
+
+
+def select_department_top_records(records: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    by_department: dict[str, list[tuple[Decimal, int, dict[str, Any]]]] = defaultdict(list)
+    for source_order, record in enumerate(records):
+        mapping = _field_map(list(record))
+        department = str(_value(record, mapping, "department") or "").strip()
+        amount = _parse_amount(_value(record, mapping, "fund_payment"))
+        if department and amount is not None:
+            by_department[department].append((amount, source_order, record))
+
+    selected = []
+    for department in sorted(by_department):
+        ranked = sorted(by_department[department], key=lambda entry: (-entry[0], entry[1]))
+        selected.extend(entry[2] for entry in ranked[:limit])
+    return selected
+
+
 def _canonical_row(record: dict[str, Any]) -> dict[str, Any]:
     mapping = _field_map(list(record))
     output = dict(record)
@@ -289,6 +329,8 @@ def _canonical_row(record: dict[str, Any]) -> dict[str, Any]:
         "住院或门诊号": _value(record, mapping, "visit_no"),
         "就诊ID": _value(record, mapping, "visit_id"),
         "人员姓名": _value(record, mapping, "name"),
+        "科室名称": _value(record, mapping, "department"),
+        "基金支付总额": _value(record, mapping, "fund_payment"),
         "入院日期": _value(record, mapping, "admission"),
         "出院日期": _value(record, mapping, "discharge"),
         "结算日期": _value(record, mapping, "settlement"),
@@ -368,10 +410,12 @@ def unique_output_path(directory: Path, seed: int) -> Path:
     raise RuntimeError("无法生成不重名的输出文件")
 
 
-def extract_files(files: Iterable[str | Path], start: date, end: date, target: int, seed: int, output_dir: str | Path, return_errors: bool = False):
+def extract_files(files: Iterable[str | Path], start: date, end: date, target: int, seed: int, output_dir: str | Path, return_errors: bool = False, extraction_mode: str = MODE_RANDOM):
     if start > end:
         raise ValueError("检查开始日期不能晚于结束日期")
-    if target < 1:
+    if extraction_mode not in EXTRACTION_MODES:
+        raise ValueError(f"不支持的抽取方式：{extraction_mode}")
+    if extraction_mode == MODE_RANDOM and target < 1:
         raise ValueError("每文件抽取条数必须大于 0")
     sources = [Path(file).resolve() for file in files]
     if not sources:
@@ -380,10 +424,13 @@ def extract_files(files: Iterable[str | Path], start: date, end: date, target: i
     for source in sources:
         try:
             file_seed = int(hashlib.sha256(f"{seed}|{source.name.lower()}".encode("utf-8")).hexdigest()[:16], 16)
-            candidates, summary, headers = read_candidates(source, start, end, file_seed)
-            selected = select_records(candidates, target, file_seed)
+            candidates, summary, headers = read_candidates(source, start, end, file_seed, extraction_mode)
+            if extraction_mode == MODE_DEPARTMENT_TOP10:
+                selected = select_department_top_records(candidates)
+            else:
+                selected = select_records(candidates, target, file_seed)
             summary.selected = len(selected)
-            if len(selected) < target:
+            if extraction_mode == MODE_RANDOM and len(selected) < target:
                 summary.message = f"候选不足：目标 {target}，实际 {len(selected)}"
             records.extend(selected)
             summaries.append(summary)
@@ -394,7 +441,15 @@ def extract_files(files: Iterable[str | Path], start: date, end: date, target: i
     output = unique_output_path(Path(output_dir).resolve(), seed)
     if output in sources:
         raise ValueError("输出文件不能与源文件相同")
-    params = {"工具版本": APP_VERSION, "检查开始日期": start.isoformat(), "检查结束日期": end.isoformat(), "每文件目标条数": target, "随机种子": seed, "隐私规则": "姓名完整保留；个人/人员编号、身份证/证件号整列不输出"}
+    params = {
+        "工具版本": APP_VERSION,
+        "抽取方式": extraction_mode,
+        "检查开始日期": start.isoformat(),
+        "检查结束日期": end.isoformat(),
+        "每文件目标条数": target if extraction_mode == MODE_RANDOM else "不适用（每科室固定前10）",
+        "随机种子": seed if extraction_mode == MODE_RANDOM else "不适用",
+        "隐私规则": "姓名完整保留；个人/人员编号、身份证/证件号整列不输出",
+    }
     write_result(output, records, summaries, params, raw_headers, errors)
     if len(errors) == len(sources):
         raise BatchExtractionError(output, errors)
